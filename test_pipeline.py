@@ -104,10 +104,10 @@ async def main():
         print("  RESULT: FAILED")
         print("=" * 70)
         for e in errors:
-            print(f"  ✖ {e}")
+            print(f"  [X] {e}")
         sys.exit(1)
     else:
-        print("  RESULT: ALL ASSERTIONS PASSED ✓")
+        print("  RESULT: ALL ASSERTIONS PASSED [OK]")
         print("=" * 70)
         sys.exit(0)
 

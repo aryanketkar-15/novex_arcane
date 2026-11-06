@@ -18,61 +18,85 @@ import time
 import functools
 from datetime import datetime
 from typing import TypedDict, Optional, Any
-
-try:
-    from agents.analyst_agent import analyze as run_analyst
-except ImportError as _e:
-    logger.warning(f"[ARCANE] analyst_agent not available: {_e}")
-    run_analyst = None
-
-try:
-    from agents.git_bisect_agent import run_bisect
-except ImportError as _e:
-    logger.warning(f"[ARCANE] git_bisect_agent not available: {_e}")
-    run_bisect = None
-
-try:
-    from agents.patch_generator import generate_patch as run_patch_generator
-except ImportError as _e:
-    logger.warning(f"[ARCANE] patch_generator not available: {_e}")
-    run_patch_generator = None
-
-try:
-    from agents.validator_agent import validate, capture_baseline
-except ImportError as _e:
-    logger.warning(f"[ARCANE] validator_agent not available: {_e}")
-    validate = capture_baseline = None
-
-try:
-    from agents.regression_test_generator import generate_regression_test
-except ImportError as _e:
-    logger.warning(f"[ARCANE] regression_test_generator not available: {_e}")
-    generate_regression_test = None
-
-try:
-    from agents.cross_file_propagator import CrossFilePropagator
-    _propagator = CrossFilePropagator()
-except ImportError as _e:
-    logger.warning(f"[ARCANE] cross_file_propagator not available: {_e}")
-    _propagator = None
-
-try:
-    from agents.conflict_resolver import ConflictResolver
-    _conflict_resolver = ConflictResolver()
-except ImportError as _e:
-    logger.warning(f"[ARCANE] conflict_resolver not available: {_e}")
-    _conflict_resolver = None
-
-try:
-    from agents.pr_agent import create_pr
-except ImportError as _e:
-    logger.warning(f"[ARCANE] pr_agent not available: {_e}")
-    create_pr = None
-
-from langgraph.graph import StateGraph, END
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# When ARCANE_MOCK_MODE=1, skip all real agent imports and use mocks
+_MOCK_MODE = os.environ.get("ARCANE_MOCK_MODE", "0") == "1"
+if _MOCK_MODE:
+    logger.info("[ARCANE] MOCK_MODE enabled -- all agents will use mock fallbacks")
+
+if _MOCK_MODE:
+    run_analyst = run_bisect = run_patch_generator = None
+    validate = capture_baseline = generate_regression_test = None
+    _propagator = _conflict_resolver = None
+    create_pr = None
+    _chroma_client = query_memory = None
+else:
+    try:
+        from agents.analyst_agent import analyze as run_analyst
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] analyst_agent not available: {_e}")
+        run_analyst = None
+
+    try:
+        from agents.git_bisect_agent import run_bisect
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] git_bisect_agent not available: {_e}")
+        run_bisect = None
+
+    try:
+        from agents.patch_generator import generate_patch as run_patch_generator
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] patch_generator not available: {_e}")
+        run_patch_generator = None
+
+    try:
+        from agents.validator_agent import validate, capture_baseline
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] validator_agent not available: {_e}")
+        validate = capture_baseline = None
+
+    try:
+        from agents.regression_test_generator import generate_regression_test
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] regression_test_generator not available: {_e}")
+        generate_regression_test = None
+
+    try:
+        from agents.cross_file_propagator import CrossFilePropagator
+        _propagator = CrossFilePropagator()
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] cross_file_propagator not available: {_e}")
+        _propagator = None
+
+    try:
+        from agents.conflict_resolver import ConflictResolver
+        _conflict_resolver = ConflictResolver()
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] conflict_resolver not available: {_e}")
+        _conflict_resolver = None
+
+    try:
+        from agents.pr_agent import create_pr
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] pr_agent not available: {_e}")
+        create_pr = None
+
+    try:
+        from agents.chroma_memory import init_memory, query_memory
+        _chroma_client = init_memory(os.path.join(os.path.dirname(__file__), '..', 'chroma_data'))
+        logger.info("[ARCANE] ChromaDB patch memory loaded")
+    except ImportError as _e:
+        logger.warning(f"[ARCANE] chroma_memory not available: {_e}")
+        _chroma_client = query_memory = None
+    except Exception as _e:
+        logger.warning(f"[ARCANE] chroma_memory init failed: {_e}")
+        _chroma_client = query_memory = None
+
+from langgraph.graph import StateGraph, END
 
 MAX_RETRIES = 3
 NODE_TIMEOUT = 90  # seconds — any node exceeding this is auto-escalated
@@ -183,9 +207,27 @@ def idle_node(state: ArcaneState) -> ArcaneState:
 
 @with_timeout("ANALYZING")
 def analyzing_node(state: ArcaneState) -> ArcaneState:
-    """ANALYZING — parses failure log to extract test name, file, line, root cause."""
+    """ANALYZING — parses failure log to extract test name, file, line, root cause.
+    Fast path: if ChromaDB has a cached patch for a similar error, skip LLM analysis.
+    """
     logger.info("[ANALYZING] Delegating to Analyst Agent")
     try:
+        # Fast path: check ChromaDB memory for a cached patch match
+        if _chroma_client and query_memory:
+            failure_log = state.get("failure_log", "")
+            cached = query_memory(_chroma_client, failure_log)
+            if cached:
+                logger.info("[ANALYZING] MEMORY HIT -- reusing cached patch (fast path)")
+                return {
+                    **state,
+                    "root_cause_summary": cached.get("root_cause", "Cached root cause"),
+                    "patch_diff": cached.get("patch_diff", ""),
+                    "failing_test": cached.get("test_file", "unknown"),
+                    "memory_hit": True,
+                    "agents_used": state.get("agents_used", "") + "chroma_memory,",
+                }
+            logger.info("[ANALYZING] No memory match -- falling through to LLM")
+
         if run_analyst:
             updated = run_analyst(state)
             result = {**state, **updated}
@@ -330,12 +372,12 @@ def validating_node(state: ArcaneState) -> ArcaneState:
             
         logger.warning("WARNING: validator_agent not available — using mock")
         passed = retry <= 1
-        mock_score = 0.95 if passed else 0.30
+        mock_score = 95 if passed else 30
         return {
             **state,
             "tests_passed": passed,
             "confidence_score": mock_score,
-            "auto_approved": mock_score >= 0.85,
+            "auto_approved": mock_score >= 85,
         }
     except Exception as e:
         state['error'] = str(e)
@@ -403,7 +445,7 @@ def done_node(state: ArcaneState) -> ArcaneState:
 
     logger.info(
         "\n" + "=" * 70 + "\n"
-        "  [DONE] ARCANE Pipeline — SUCCESS SUMMARY\n"
+        "  [DONE] ARCANE Pipeline -- SUCCESS SUMMARY\n"
         "=" * 70 + "\n"
         f"  PR URL          : {state.get('pr_url', 'N/A')}\n"
         f"  Total Time      : {elapsed:.1f}s\n"
@@ -423,7 +465,7 @@ def escalated_node(state: ArcaneState) -> ArcaneState:
     elapsed = time.time() - state.get("pipeline_start_time", time.time())
     report = (
         "\n" + "!" * 70 + "\n"
-        "  [ESCALATED] ARCANE Pipeline — ESCALATION REPORT\n"
+        "  [ESCALATED] ARCANE Pipeline -- ESCALATION REPORT\n"
         "!" * 70 + "\n"
         f"  Commit SHA      : {state.get('commit_sha', '?')}\n"
         f"  Failing Test    : {state.get('failing_test', '?')}\n"
@@ -438,8 +480,8 @@ def escalated_node(state: ArcaneState) -> ArcaneState:
     return {
         **state,
         "error": (
-            f"Escalated after {state.get('retry_count', 0)} retries — "
-            f"confidence: {state.get('confidence_score', 'N/A')} — "
+            f"Escalated after {state.get('retry_count', 0)} retries -- "
+            f"confidence: {state.get('confidence_score', 'N/A')} -- "
             f"human review required for {state.get('failing_test', 'unknown test')}"
         ),
     }
@@ -460,10 +502,13 @@ def after_patching(state: ArcaneState) -> str:
 def after_validating(state: ArcaneState) -> str:
     """After VALIDATING: route based on test results + confidence + retry count."""
     confidence = state.get("confidence_score", 0)
-    # Confidence gating: < 60% means do NOT attempt PR, escalate immediately
+    # Normalize 0-1 scale to 0-100 if needed
+    if isinstance(confidence, float) and confidence <= 1.0:
+        confidence = confidence * 100
+    # Confidence gating: < 60 means do NOT attempt PR, escalate immediately
     if isinstance(confidence, (int, float)) and confidence < 60:
         logger.warning(
-            f"[VALIDATING] Confidence {confidence}% < 60% — too low, escalating"
+            f"[VALIDATING] Confidence {confidence:.0f}% < 60% — too low, escalating"
         )
         return "escalated"
     if state.get("tests_passed"):
