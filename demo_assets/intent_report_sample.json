@@ -1,0 +1,66 @@
+{
+  "bisect_result": {
+    "first_bad_commit": "b3c4d5e6f7a890123456789abcdef0123456789ab",
+    "author": "dev-teammate <dev@arcane.io>",
+    "date": "2026-04-25T14:32:17+05:30",
+    "commit_message": "fix: update validate_token signature",
+    "files_changed": ["auth.py"],
+    "insertions": 2,
+    "deletions": 2
+  },
+  "intent_analysis": {
+    "intent": "signature_change",
+    "description": "Changed validate_token() to accept an optional 'token' parameter with default=None, but the function body performs .decode() on the token without a None guard, causing AttributeError when called without arguments.",
+    "risk_level": "high",
+    "semantic_category": "API contract break"
+  },
+  "changed_lines": [
+    {
+      "file": "auth.py",
+      "function": "validate_token",
+      "line_number": 42,
+      "before": "def validate_token(token: str) -> bool:",
+      "after": "def validate_token(token: str = None) -> bool:",
+      "change_type": "signature_modification"
+    },
+    {
+      "file": "auth.py",
+      "function": "validate_token",
+      "line_number": 48,
+      "before": "    decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])",
+      "after": "    decoded = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])",
+      "change_type": "unchanged_but_now_vulnerable",
+      "note": "This line crashes with AttributeError when token=None because jwt.decode() calls token.encode() internally"
+    }
+  ],
+  "confidence": {
+    "bisect_confidence": 0.94,
+    "intent_confidence": 0.91,
+    "overall_confidence": 0.92,
+    "reasoning": "Binary search converged cleanly in 5 steps. Single file changed with a clear signature modification. The None-path crash is deterministic and reproducible."
+  },
+  "downstream_impact": {
+    "callers_affected": [
+      "routes/login.py:verify_session() - line 23",
+      "middleware/auth_middleware.py:check_auth() - line 15",
+      "tests/test_auth.py:test_login_validation() - line 8"
+    ],
+    "total_callers": 3,
+    "breaking_callers": 1,
+    "note": "Only test_login_validation() calls validate_token(None) explicitly. Production callers always pass a token string."
+  },
+  "suggested_fix": {
+    "strategy": "Add None guard at function entry",
+    "patch_hint": "if token is None: return False",
+    "estimated_lines": 2
+  },
+  "metadata": {
+    "agent": "ARCANE Bisect Agent v2.0",
+    "repo": "aryanketkar-15/ARCANE_Nexus2.0",
+    "branch": "main",
+    "pipeline_run_id": "arcane-demo-run-001",
+    "timestamp": "2026-04-25T19:00:00Z",
+    "bisect_steps": 5,
+    "total_time_seconds": 8.3
+  }
+}

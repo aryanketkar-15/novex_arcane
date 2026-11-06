@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ARCANE Bisect Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  .terminal {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    width: 900px;
+    min-height: 600px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    overflow: hidden;
+  }
+  .titlebar {
+    background: #161b22;
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 8px;
+    border-bottom: 1px solid #30363d;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.red { background: #ff5f56; }
+  .dot.yellow { background: #ffbd2e; }
+  .dot.green { background: #27c93f; }
+  .titlebar span {
+    color: #8b949e; font-size: 13px; margin-left: 12px;
+  }
+  .content {
+    padding: 16px 20px;
+    color: #c9d1d9;
+    font-size: 14px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .prompt { color: #58a6ff; }
+  .cmd { color: #f0f6fc; }
+  .success { color: #3fb950; }
+  .warning { color: #d29922; }
+  .error { color: #f85149; }
+  .dim { color: #8b949e; }
+  .highlight { color: #ff7b72; font-weight: bold; }
+  .result-box {
+    border: 1px solid #3fb950;
+    border-radius: 6px;
+    padding: 12px;
+    margin-top: 8px;
+    background: rgba(63, 185, 80, 0.05);
+  }
+  .cursor {
+    display: inline-block;
+    width: 8px; height: 16px;
+    background: #58a6ff;
+    animation: blink 1s step-end infinite;
+    vertical-align: text-bottom;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  #output span { opacity: 0; animation: fadeIn 0.05s forwards; }
+  @keyframes fadeIn { to { opacity: 1; } }
+</style>
+</head>
+<body>
+<div class="terminal">
+  <div class="titlebar">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+    <span>ARCANE Bisect Agent -- aryanketkar-15/ARCANE_Nexus2.0</span>
+  </div>
+  <div class="content" id="output"></div>
+</div>
+<script>
+const lines = [
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 400 },
+  { text: "git bisect start\n", cls: "cmd", delay: 600 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect bad HEAD\n", cls: "cmd", delay: 600 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect good v1.0.0\n\n", cls: "cmd", delay: 800 },
+
+  { text: "Bisecting: 12 revisions left to test after this (roughly 4 steps)\n", cls: "dim", delay: 700 },
+  { text: "[e4a1b2c] refactor: update user model schema\n\n", cls: "warning", delay: 500 },
+
+  { text: "Running test suite... ", cls: "dim", delay: 1200 },
+  { text: "PASSED\n", cls: "success", delay: 400 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect good\n", cls: "cmd", delay: 600 },
+  { text: "Bisecting: 6 revisions left to test after this (roughly 3 steps)\n", cls: "dim", delay: 500 },
+  { text: "[a7b8c9d] feat: add rate limiting middleware\n\n", cls: "warning", delay: 500 },
+
+  { text: "Running test suite... ", cls: "dim", delay: 1200 },
+  { text: "PASSED\n", cls: "success", delay: 400 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect good\n", cls: "cmd", delay: 600 },
+  { text: "Bisecting: 3 revisions left to test after this (roughly 2 steps)\n", cls: "dim", delay: 500 },
+  { text: "[f1e2d3c] fix: patch auth token validation\n\n", cls: "warning", delay: 500 },
+
+  { text: "Running test suite... ", cls: "dim", delay: 1200 },
+  { text: "FAILED\n", cls: "error", delay: 400 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect bad\n", cls: "cmd", delay: 600 },
+  { text: "Bisecting: 1 revision left to test after this (roughly 1 step)\n", cls: "dim", delay: 500 },
+  { text: "[c9d8e7f] chore: update dependencies\n\n", cls: "warning", delay: 500 },
+
+  { text: "Running test suite... ", cls: "dim", delay: 1200 },
+  { text: "PASSED\n", cls: "success", delay: 400 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect good\n", cls: "cmd", delay: 600 },
+  { text: "Bisecting: 0 revisions left to test after this (roughly 0 steps)\n", cls: "dim", delay: 500 },
+  { text: "[b3c4d5e] fix: update validate_token signature\n\n", cls: "warning", delay: 500 },
+
+  { text: "Running test suite... ", cls: "dim", delay: 1200 },
+  { text: "FAILED\n", cls: "error", delay: 400 },
+  { text: "arcane@gpu ~> ", cls: "prompt", delay: 300 },
+  { text: "git bisect bad\n\n", cls: "cmd", delay: 800 },
+
+  { text: "b3c4d5e6f7a8 is the first bad commit\n", cls: "highlight", delay: 1000 },
+  { text: "\n", cls: "", delay: 200 },
+  { text: "======================================================================\n", cls: "success", delay: 100 },
+  { text: "  ARCANE Bisect Agent -- Summary\n", cls: "success", delay: 100 },
+  { text: "======================================================================\n", cls: "success", delay: 100 },
+  { text: "  Result        : ", cls: "dim", delay: 80 },
+  { text: "b3c4d5e6f7a8 is the first bad commit\n", cls: "highlight", delay: 200 },
+  { text: "  Author        : dev-teammate <dev@arcane.io>\n", cls: "dim", delay: 80 },
+  { text: "  Message       : fix: update validate_token signature\n", cls: "dim", delay: 80 },
+  { text: "  File Changed  : auth.py\n", cls: "dim", delay: 80 },
+  { text: "  Function      : validate_token()\n", cls: "warning", delay: 80 },
+  { text: "  Root Cause    : Optional parameter added without None guard\n", cls: "error", delay: 80 },
+  { text: "  Confidence    : ", cls: "dim", delay: 80 },
+  { text: "94%\n", cls: "success", delay: 200 },
+  { text: "  Time          : 8.3s (5 bisect steps)\n", cls: "dim", delay: 80 },
+  { text: "======================================================================\n", cls: "success", delay: 100 },
+];
+
+async function run() {
+  const el = document.getElementById("output");
+  for (const line of lines) {
+    const span = document.createElement("span");
+    span.className = line.cls;
+    // Type character by character for commands
+    if (line.cls === "cmd") {
+      for (const ch of line.text) {
+        span.textContent += ch;
+        el.appendChild(span);
+        el.scrollTop = el.scrollHeight;
+        await new Promise(r => setTimeout(r, 35));
+      }
+    } else {
+      span.textContent = line.text;
+      span.style.animationDelay = "0s";
+      el.appendChild(span);
+    }
+    el.scrollTop = el.scrollHeight;
+    await new Promise(r => setTimeout(r, line.delay));
+  }
+  // Add blinking cursor at end
+  const cur = document.createElement("span");
+  cur.className = "prompt";
+  cur.textContent = "arcane@gpu ~> ";
+  el.appendChild(cur);
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  cursor.innerHTML = "&nbsp;";
+  el.appendChild(cursor);
+}
+run();
+</script>
+</body>
+</html>

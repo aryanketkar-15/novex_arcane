@@ -333,11 +333,13 @@ def conflict_checking_node(state: ArcaneState) -> ArcaneState:
     try:
         if _conflict_resolver:
             result = _conflict_resolver.check(state)
+            # Aryan's ConflictResolver now returns confidence_score
+            score = result.get("confidence_score", result.get("score", 1.0))
             return {
                 **state,
                 "conflict_detected": result.get("conflicts_found", False),
                 "conflict_action": result.get("action", "no_conflict"),
-                "conflict_score": result.get("score", 1.0),
+                "conflict_score": score,
                 "conflict_details": result.get("details", []),
                 "agents_used": state.get("agents_used", "") + "conflict,",
             }
@@ -364,7 +366,8 @@ def validating_node(state: ArcaneState) -> ArcaneState:
             result = {**state, **updated}
             result["agents_used"] = state.get("agents_used", "") + "validator,"
             # Auto-approve if confidence >= 85%
-            score = result.get("confidence_score", 0)
+            # Check for confidence_score with fallback to score
+            score = result.get("confidence_score", result.get("score", 0))
             if isinstance(score, (int, float)) and score >= 85:
                 result["auto_approved"] = True
                 logger.info(f"[VALIDATING] Confidence {score}% >= 85% — auto-approved")

@@ -1,0 +1,55 @@
+$ git bisect start
+$ git bisect bad HEAD
+$ git bisect good v1.0.0
+
+Bisecting: 12 revisions left to test after this (roughly 4 steps)
+[e4a1b2c3d4f5678901234567890abcdef1234567] refactor: update user model schema
+
+$ git bisect good
+Bisecting: 6 revisions left to test after this (roughly 3 steps)
+[a7b8c9d0e1f234567890abcdef1234567890abcd] feat: add rate limiting middleware
+
+$ git bisect good
+Bisecting: 3 revisions left to test after this (roughly 2 steps)
+[f1e2d3c4b5a678901234567890abcdef12345678] fix: patch auth token validation
+
+$ git bisect bad
+Bisecting: 1 revision left to test after this (roughly 1 step)
+[c9d8e7f6a5b4321098765432fedcba0987654321] chore: update dependencies
+
+$ git bisect good
+Bisecting: 0 revisions left to test after this (roughly 0 steps)
+[b3c4d5e6f7a890123456789abcdef0123456789ab] fix: update validate_token signature
+
+$ git bisect bad
+
+b3c4d5e6f7a890123456789abcdef0123456789ab is the first bad commit
+commit b3c4d5e6f7a890123456789abcdef0123456789ab
+Author: dev-teammate <dev@arcane.io>
+Date:   Fri Apr 25 14:32:17 2026 +0530
+
+    fix: update validate_token signature
+
+    Changed validate_token() to accept optional token parameter,
+    but forgot to handle the None case, breaking downstream callers.
+
+ auth.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+$ git bisect reset
+Previous HEAD position was b3c4d5e... fix: update validate_token signature
+Switched to branch 'main'
+
+===============================================================================
+  ARCANE Bisect Agent -- Summary
+===============================================================================
+  Result          : b3c4d5e6f7a8 is the first bad commit
+  Author          : dev-teammate <dev@arcane.io>
+  Commit Message  : fix: update validate_token signature
+  File Changed    : auth.py
+  Function        : validate_token()
+  Root Cause      : Optional parameter added without None guard
+  Confidence      : 94%
+  Steps Taken     : 5 bisect iterations
+  Total Time      : 8.3s
+===============================================================================
