@@ -410,16 +410,15 @@ def creating_pr_node(state: ArcaneState) -> ArcaneState:
     logger.info("[CREATING_PR] Opening pull request")
     try:
         if create_pr:
-            pr_url = create_pr(
-                repo_full_name=state.get("repo_full_name", ""),
-                base_branch="main",
-                commit_sha=state.get("commit_sha", "unknown"),
-                patch_diff=state.get("patch_diff", ""),
-                failing_test=state.get("failing_test", "unknown_test"),
-                validator_summary=f"Tests passed: {state.get('tests_passed')}, "
-                                  f"Confidence: {state.get('confidence_score', 'N/A')}"
-            )
-            result = {**state, "pr_url": pr_url}
+            # Rishi's create_pr now takes the full state dict
+            pr_result = create_pr(state)
+            if isinstance(pr_result, str):
+                # Backwards compat: if create_pr returns just a URL string
+                result = {**state, "pr_url": pr_result}
+            elif isinstance(pr_result, dict):
+                result = {**state, **pr_result}
+            else:
+                result = {**state, "pr_url": str(pr_result)}
             result["agents_used"] = state.get("agents_used", "") + "pr_agent,"
             return result
             
