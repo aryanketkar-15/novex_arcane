@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import "./Dashboard.css";
 
-const API_URL = "http://127.0.0.1:8000/api/status";
+const API_URL = `${
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
+}/api/status`;
 
 const STATE_META = {
   IDLE:       { label: "IDLE",       cls: "badge--idle"      },
