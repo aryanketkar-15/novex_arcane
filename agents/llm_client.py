@@ -2,8 +2,8 @@ import os
 import logging
 import requests
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from contextvars import ContextVar
+from urllib.parse import quote
 
 # Always load .env so API keys and model overrides are present
 load_dotenv(override=True)
@@ -78,6 +78,13 @@ def _pick_fallback(system: str) -> str:
     return ""
 
 
+def offline_response(system: str) -> str:
+    from agents.execution_mode import is_hosted_mode
+    if is_hosted_mode():
+        raise RuntimeError("No model responded. Review the keys and model IDs in Settings > Models.")
+    return _pick_fallback(system)
+
+
 def call_ollama(prompt: str, system: str = '') -> str:
     """
     Tier 3 fallback: local Ollama llama3:8b.
@@ -85,97 +92,76 @@ def call_ollama(prompt: str, system: str = '') -> str:
     """
     if os.getenv("OLLAMA_DISABLED", "0").lower() in ("1", "true", "yes"):
         logger.info("[LLM_Client] Ollama call bypassed (OLLAMA_DISABLED=1).")
-        return _pick_fallback(system)
+        return offline_response(system)
 
     logger.info("Path used: Ollama Fallback (llama3:8b)")
     try:
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         payload = {"model": "llama3:8b", "prompt": full_prompt, "stream": False}
-        res = requests.post(f"{base_url}/api/generate", json=payload, timeout=120)
+        res = requests.post(f"{base_url}/api/generate", json=payload, timeout=(4, 30))
         res.raise_for_status()
         return res.json().get("response", "").strip()
-    except Exception as e:
-        logger.warning(f"[LLM_Client] Ollama also unavailable: {e}. Using offline mock.")
-        return _pick_fallback(system)
+    except (requests.RequestException, ValueError, AttributeError):
+        logger.warning("[LLM_Client] Ollama unavailable.")
+        return offline_response(system)
 
 
-def call_gemma(prompt: str, system: str = '') -> str:
-    """
-    Second-tier fallback: Google Gemma 3 27B via the same API key.
-    Separate rate limit quota from Gemini Flash, so this works when Flash is exhausted.
-    If Gemma also fails, falls through to Ollama.
-    """
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return call_ollama(prompt, system)
 
-    try:
-        logger.info(f"Path used: Google Gemma ({GEMMA_MODEL})")
-        client = genai.Client(api_key=api_key)
-
-        # Gemma does NOT support system_instruction — prepend it to the prompt
-        full_prompt = f"{system}\n\n{prompt}" if system else prompt
-
-        config = types.GenerateContentConfig(temperature=0.2)
-
-        response = client.models.generate_content(
-            model=GEMMA_MODEL,
-            contents=full_prompt,
-
-            config=config,
-        )
-        return response.text.strip()
-
-    except Exception as e:
-        err = str(e).lower()
-        if "429" in err or "quota" in err or "exhausted" in err:
-            logger.warning("[LLM_Client] Gemma 3 27B also rate limited! Falling back to Ollama...")
-        else:
-            logger.warning(f"[LLM_Client] Gemma 3 27B failed: {e}. Falling back to Ollama...")
-        return call_ollama(prompt, system)
+personal_credentials = ContextVar("personal_credentials", default=())
 
 
-def call_llm(prompt: str, system: str = '') -> str:
-    """
-    Calls Google Gemini 2.5 Flash.
+def server_credentials():
+    google_keys = [os.getenv("GEMINI_API_KEY"), os.getenv("GOOGLE_API_KEY"),
+                   *os.getenv("GEMINI_API_KEYS", "").split(",")]
+    for model in (GEMINI_MODEL, GEMMA_MODEL):
+        for key in google_keys:
+            if key and key.strip():
+                yield "google", model, key.strip()
+    for provider in ("openai", "groq"):
+        prefix = provider.upper()
+        model = os.getenv(prefix + "_MODEL")
+        keys = [os.getenv(prefix + "_API_KEY", ""), *os.getenv(prefix + "_API_KEYS", "").split(",")]
+        for key in keys:
+            if model and key.strip():
+                yield provider, model, key.strip()
 
-    Fallback chain:
-        1. Gemini 2.5 Flash    (primary — best quality)
-        2. Gemma 3 27B         (on Flash 429 — same API key, separate quota)
-        3. Ollama llama3:8b    (on Gemma 429 — local, no API needed)
-        4. Static offline mock (if everything is down — demo always succeeds)
-    """
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        logger.warning("[LLM_Client] GEMINI_API_KEY not found — routing to Ollama fallback.")
-        return call_ollama(prompt, system)
 
-    try:
-        logger.info(f"Path used: Google Gemini ({GEMINI_MODEL})")
-        client = genai.Client(api_key=api_key)
+def generate(provider, model, key, prompt, system):
+    if provider == "google":
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{quote(model, safe='')}:generateContent"
+        headers = {"x-goog-api-key": key}
+        body = {"contents": [{"parts": [{"text": (system + "\n\n" + prompt).strip()}]}]}
+    else:
+        url = {"openai": "https://api.openai.com/v1/chat/completions",
+               "groq": "https://api.groq.com/openai/v1/chat/completions"}[provider]
+        headers = {"Authorization": "Bearer " + key}
+        messages = [{"role": "system", "content": system}] if system else []
+        body = {"model": model, "messages": messages + [{"role": "user", "content": prompt}]}
+    response = requests.post(url, headers=headers, json=body, timeout=(4, 25), allow_redirects=False)
+    response.raise_for_status()
+    data = response.json()
+    if provider == "google":
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(part.get("text", "") for part in parts if not part.get("thought")).strip()
+    return data["choices"][0]["message"]["content"].strip()
 
-        config = types.GenerateContentConfig(temperature=0.2)
-        if system:
-            config = types.GenerateContentConfig(
-                temperature=0.2,
-                system_instruction=system,
-            )
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=config,
-        )
-        return response.text.strip()
-
-    except Exception as e:
-        err = str(e).lower()
-        if any(t in err for t in ("429", "quota", "exhausted", "resource_exhausted", "404", "not_found", "no longer available", "503", "unavailable", "overloaded")):
-            logger.warning("[LLM_Client] Gemini unavailable (rate limit or retired model)! Trying Gemma...")
-        elif "400" in err or "invalid" in err or "api_key" in err:
-            logger.warning(f"[LLM_Client] Gemini API key invalid or bad request! Trying Gemma... ({e})")
-        else:
-            logger.warning(f"[LLM_Client] Gemini API call failed: {e}. Trying Gemma...")
-        return call_gemma(prompt, system)
-
+def call_llm(prompt: str, system: str = "") -> str:
+    candidates = dict.fromkeys([*personal_credentials.get(), *server_credentials()])
+    for provider, model, key in candidates:
+        if not key:
+            continue
+        try:
+            result = generate(provider, model, key, prompt, system)
+            if result:
+                logger.info("Path used: %s (%s)", provider, model)
+                return result
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError, AttributeError):
+            # Provider errors can echo credentials or private repository content.
+            pass
+        logger.warning("Model %s (%s) unavailable, trying next credential", provider, model)
+    from agents.execution_mode import is_hosted_mode
+    if is_hosted_mode() and not os.getenv("OLLAMA_BASE_URL", "").strip():
+        raise RuntimeError("No model responded. Review the keys and model IDs in Settings > Models.")
+    return call_ollama(prompt, system)

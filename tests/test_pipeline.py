@@ -90,7 +90,8 @@ def test_pipeline_happy_path(
         "source": "webhook",
     }
 
-    result = asyncio.run(run_pipeline(event))
+    with patch("agents.orchestrator.run_bisect", side_effect=lambda state: state), patch.dict(os.environ, {"ARCANE_DRY_RUN": "0"}):
+        result = asyncio.run(run_pipeline(event))
 
     # Pipeline should reach DONE with a PR URL
     assert result.get("pr_url"), f"Expected pr_url, got: {result}"
@@ -130,11 +131,12 @@ def test_pipeline_escalation_path(mock_chroma_query, mock_sandbox_runner, mock_v
         "source": "webhook",
     }
 
-    result = asyncio.run(run_pipeline(event))
+    with patch("agents.orchestrator.run_bisect", side_effect=lambda state: state):
+        result = asyncio.run(run_pipeline(event))
 
     # Pipeline should escalate — no PR created
     assert result.get("error") is not None
-    assert "escalated" in result.get("error", "").lower() or "retry" in result.get("error", "").lower()
+    assert "did not return corrected source" in result["error"]
     assert result.get("retry_count", 0) >= 3
 
 
@@ -166,7 +168,10 @@ def test_pipeline_hosted_happy_path(
         "source": "webhook",
     }
 
-    result = asyncio.run(run_pipeline(event))
+    context = {"changes": {"src/auth.py": "changed threshold"}, "traces": [], "tests": {},
+               "candidates": ["src/auth.py"], "failed_tests": ["tests/test_auth.py::test_valid_token"]}
+    with patch("agents.github_diagnostics.historical_context", return_value=context), patch.dict(os.environ, {"ARCANE_DRY_RUN": "0"}):
+        result = asyncio.run(run_pipeline(event))
 
     assert result.get("pr_url") == "https://github.com/test/repo/pull/100-draft"
     assert result.get("execution_mode") == "hosted"

@@ -62,7 +62,7 @@ def get_visible(run_id: str, user) -> dict:
 
 
 def public_run(run: dict, detail: bool = False) -> dict:
-    out = {k: v for k, v in run.items() if k not in ("logs", "failureLog", "patchDiff", "regressionTest")}
+    out = {k: v for k, v in run.items() if k not in ("logs", "failureLog", "patchDiff", "regressionTest", "patchedContent")}
     st = diff_stats(run.get("patchDiff", ""))
     out["diffSummary"] = {"files": len(st["files"]), "add": st["add"], "del": st["del"]}
     out["logCount"] = len(run.get("logs", []))
@@ -105,24 +105,18 @@ def fetch_github_run(repo: str, run_id: str, token: Optional[str] = None) -> dic
                 if job.conclusion == "failure":
                     steps = [s.name for s in job.steps if s.conclusion == "failure"]
                     failed.append(f"Job '{job.name}' failed" + (f" at step(s): {', '.join(steps)}" if steps else ""))
-                    # Fetch raw step logs if available via GitHub API
-                    if not failure_log_text:
+                    from agents.github_diagnostics import job_diagnostics
+                    if len(failed) <= 4:
                         try:
-                            import requests
-                            log_res = requests.get(
-                                f"https://api.github.com/repos/{repo}/actions/jobs/{job.id}/logs",
-                                headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
-                                allow_redirects=True,
-                                timeout=10,
-                            )
-                            if log_res.status_code == 200 and log_res.text:
-                                failure_log_text = log_res.text
-                        except Exception as le:
-                            logger.debug(f"[API] Could not get job {job.id} logs: {le}")
+                            excerpt = job_diagnostics(repo, job.id, token)
+                            failure_log_text += f"\nJob {job.name}:\n{excerpt}"
+                        except Exception:
+                            failed.append(f"Job {job.id} log unavailable (expired or inaccessible).")
         except Exception:
             pass
         head = wf.head_commit
         return {
+            "conclusion": wf.conclusion,
             "sha": wf.head_sha,
             "branch": wf.head_branch,
             "message": head.message if head else "",
@@ -255,10 +249,18 @@ def create_run(body: NewRun, request: Request, user=Depends(require_user)):
     repo = repo or url_repo or ""
     if not repo or "/" not in repo:
         raise HTTPException(400, "Repository must look like owner/name.")
+    if body.workflowRun and not run_id:
+        raise HTTPException(400, "Expected a GitHub Actions run URL or numeric ID.")
+    if url_repo and url_repo.lower() != repo.lower():
+        raise HTTPException(400, "Workflow URL and selected repository disagree.")
     from api.auth import token_for_login, token_for_repo
     user_token = (user or {}).get("token") or token_for_login(login_of(user)) or token_for_repo(repo)
     gh = fetch_github_run(repo, run_id, token=user_token) if run_id else {}
-    sha = body.sha.strip() or gh.get("sha", "") or ""
+    if run_id and not gh.get("sha"):
+        raise HTTPException(422, "Cannot read this workflow run. Check the repository, run ID and Actions read access.")
+    if run_id and gh.get("conclusion") not in ("failure", "timed_out", "startup_failure"):
+        raise HTTPException(422, "Select a completed, failed workflow run.")
+    sha = gh.get("sha") or body.sha.strip()
     log_parts = [p for p in (body.failureLog, gh.get("log"), gh.get("summary"), gh.get("message"), body.context) if p]
     failure_log = "\n".join(log_parts) or f"Manual repair requested for {repo} on {body.branch}"
     event = {
@@ -320,10 +322,12 @@ def open_pr(run_id: str, body: PrBody, user=Depends(require_user)):
     run = get_visible(run_id, user)
     if run["status"] == "working":
         raise HTTPException(409, "This repair is still running.")
+    if not run.get("patchDiff", "").strip():
+        raise HTTPException(409, "No source patch is available.")
     if not run["prUrl"]:
         try:
             if os.getenv("ARCANE_DRY_RUN", "").lower() in ("1", "true", "yes"):
-                run["prUrl"] = f"https://github.com/{run['repo']}/pull/dry-run-{run['sha'][:7]}"
+                raise HTTPException(409, "Dry run is enabled; no GitHub PR was opened.")
             else:
                 from agents.pr_agent import create_pr
                 from api.auth import token_for_login
@@ -331,6 +335,8 @@ def open_pr(run_id: str, body: PrBody, user=Depends(require_user)):
                 tok = (user or {}).get("token") or token_for_login(run.get("owner", ""))
                 with github_token(tok):
                     run["prUrl"] = create_pr(build_state_from_run(run))
+        except HTTPException:
+            raise
         except Exception as e:
             store.log(run, "ERROR", f"Open PR failed: {e}")
             store.save()

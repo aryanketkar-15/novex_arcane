@@ -319,7 +319,7 @@ def me(request: Request):
     if user is None and oauth_configured():
         raise HTTPException(401, "Not signed in")
     pub = public_user(user) or {"login": "local", "name": "Local user", "email": "", "avatar": ""}
-    pub["workspace"] = store.settings.get("workspace", "Team Bahadur")
+    pub["workspace"] = store.settings["workspace"]
     pub["oauth"] = oauth_configured()
     return pub
 

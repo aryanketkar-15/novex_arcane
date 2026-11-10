@@ -25,7 +25,7 @@ STEP_TEMPLATE = [
 ]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "workspace": "Team Bahadur",
+    "workspace": "Team Mosambi",
     "repositories": [],  # filled lazily from runs + env
     "models": [
         {"id": "gemini", "name": os.getenv("GEMINI_MODEL", "gemini-3.5-flash"), "role": "Primary"},
@@ -94,6 +94,8 @@ class Store:
             self.memory_flags = data.get("memory_flags", {})
             self.watched = data.get("watched", {})
             saved = data.get("settings", {})
+            if saved.get("workspace") == "Team Bahadur":
+                saved["workspace"] = DEFAULT_SETTINGS["workspace"]
             for k, v in saved.items():
                 self.settings[k] = v
         except Exception:

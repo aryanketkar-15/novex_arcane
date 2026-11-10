@@ -45,6 +45,13 @@ def run_hosted_commit_inspection(state: Dict[str, Any]) -> Dict[str, Any]:
     state["bisect_mode"] = "hosted_inspection"
     state["bisect_confidence"] = "uncertain"
 
+    context = state.get("diagnostics")
+    if context:
+        diff = context["changes"].get(failing_file, "")
+        return {**state, "bisect_intent_report": (
+            f"Unverified commit inspection at {target_commit_sha}. Candidate: {failing_file}.\n{diff}"
+        )}
+
     if not repo_full_name:
         report = (
             "[HOSTED COMMIT INSPECTION — UNVERIFIED]\n"

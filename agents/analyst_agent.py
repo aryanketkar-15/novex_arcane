@@ -13,13 +13,21 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
     """
     failure_log = state.get('failure_log', '')
     
-    if not failure_log:
+    context = {}
+    if state.get("execution_mode") == "hosted":
+        from agents.github_diagnostics import historical_context
+        context = historical_context(state["repo_full_name"], state["commit_sha"], failure_log, os.getenv("GITHUB_PAT"))
+        state = {**state, "diagnostics": context}
+        if not context["candidates"]:
+            return {**state, "failing_file": "", "error": "No Python repair target in the failed job traceback or historical commit changes."}
+
+    if not failure_log and not context:
         logger.warning("[Analyst] No failure log provided in state.")
         return state
 
     # 🧠 CHROMADB MEMORY FAST PATH — check only when patch memory is enabled (local mode)
     from agents.execution_mode import is_patch_memory_enabled
-    if is_patch_memory_enabled():
+    if not context and is_patch_memory_enabled():
         try:
             from agents.chroma_memory import init_memory, query_memory
             db_path = os.environ.get('CHROMADB_PATH', './chroma_data')
@@ -89,6 +97,8 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
 
     prompt = f"Here is the failure log:\n\n{failure_log}"
     
+    if context:
+        prompt += "\nHistorical commit context (select a source path from candidates; inferred targets are uncertain):\n" + json.dumps(context)
     logger.info("[Analyst] Calling LLM to parse failure log...")
     response_text = call_llm(prompt=prompt, system=system_prompt)
     
@@ -123,13 +133,27 @@ def analyze(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.info("[Analyst] Successfully parsed JSON on retry.")
         except json.JSONDecodeError as e:
             logger.error(f"[Analyst] Failed to parse JSON on retry. Error: {e}")
-            logger.error(f"Raw LLM response: {response_text}")
-            # Return original state if we completely fail, to not break the pipeline
-            return state
 
+            # Return original state if we completely fail, to not break the pipeline
+            parsed_data = {}
+
+    if not isinstance(parsed_data, dict):
+        parsed_data = {}
     failing_file = parsed_data.get("failing_file", "")
     failing_test = parsed_data.get("failing_test", "")
 
+    if context:
+        if failing_file not in context["candidates"]:
+            plausible = context["traces"] or list(context["changes"])
+            if len(plausible) > 1:
+                stems = {os.path.basename(t).removeprefix("test_") for t in context["tests"]}
+                matches = [path for path in plausible if os.path.basename(path) in stems]
+                plausible = matches or plausible
+            failing_file = plausible[0] if len(plausible) == 1 else ""
+        if context["failed_tests"]:
+            failing_test = context["failed_tests"][0]
+        if failing_file and failing_file not in context["traces"]:
+            parsed_data["root_cause_summary"] = "Uncertain target inferred from commit changes and available tests. " + str(parsed_data.get("root_cause_summary", ""))
     # If LLM couldn't extract a real failing file, do not fabricate demo data
     placeholder_values = {
         "unknown_file", "unknown_file.py", "unknown", "", None,

@@ -163,9 +163,7 @@ export interface GhRepo {
   name: string;
   private: boolean;
   defaultBranch: string;
-  pushedAt: string;
-  watched: boolean;
-  canAdmin: boolean;
+  watched?: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -196,12 +194,37 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const post = <T>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) });
 
+function normalizeRun(run: Run): Run {
+  return { ...run, steps: Array.isArray(run.steps) ? run.steps : [] };
+}
+
+type RepoEntry = GhRepo & { fullName?: string };
+
+async function githubRepos() {
+  const response = await request<RepoEntry[] | { repos?: RepoEntry[] } | null>("/github/repos");
+  const rows = Array.isArray(response) ? response : response?.repos;
+  return {
+    repos: Array.isArray(rows)
+      ? rows.map((repo) => ({ ...repo, name: repo.fullName || repo.name }))
+      : [],
+  };
+}
+
+export type ModelCredential = { id: number; provider: "google" | "openai" | "groq"; model: string };
+
 export const api = {
+  modelKeys: () => request<ModelCredential[]>("/settings/model-keys"),
+  addModelKey: (provider: ModelCredential["provider"], model: string, key: string) =>
+    post("/settings/model-keys", { provider, model, key }),
+  removeModelKey: (id: number) => request(`/settings/model-keys/${id}`, { method: "DELETE" }),
   overview: () => request<Overview>("/overview"),
-  runs: (q = "") => request<{ runs: Run[] }>(`/runs${q}`),
-  run: (id: string) => request<Run>(`/runs/${id}`),
+  runs: async (q = "") => {
+    const { runs } = await request<{ runs: Run[] }>(`/runs${q}`);
+    return { runs: runs.map(normalizeRun) };
+  },
+  run: (id: string) => request<Run>(`/runs/${id}`).then(normalizeRun),
   createRun: (b: { repo: string; branch: string; workflowRun: string; context: string }) =>
-    post<Run>("/runs", b),
+    post<Run>("/runs", b).then(normalizeRun),
   retry: (id: string, b: { hint: string; files: string[]; model: string }) =>
     post<Run>(`/runs/${id}/retry`, b),
   openPr: (id: string, b: { title: string; comment: string }) =>
@@ -228,7 +251,7 @@ export const api = {
   me: () => request<Me>("/me"),
   authConfig: () => request<{ oauth: boolean }>("/auth/config"),
   logout: () => post<{ ok: boolean }>("/auth/logout"),
-  ghRepos: () => request<{ repos: GhRepo[] }>("/github/repos"),
+  ghRepos: githubRepos,
   watch: (repo: string) => post<{ ok: boolean; message: string }>("/github/watch", { repo, webhook: true }),
   unwatch: (repo: string) =>
     request<{ ok: boolean }>(`/github/watch?repo=${encodeURIComponent(repo)}`, { method: "DELETE" }),

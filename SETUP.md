@@ -177,3 +177,22 @@ Compress-Archive -Path arcane-share\* -DestinationPath arcane-share.zip
 ```
 
 (`robocopy` exit codes 0–7 mean success.) Contributors unzip it and follow this guide from step 1.
+
+## Model keys and fallback
+
+Sign in with GitHub and open **Settings → Models**. Add a provider, its exact
+model ID, and an API key. Add more entries for backup keys or different
+models. Each new repair tries the owner's entries in insertion order, then
+server credentials. Model access and quota depend on the provider account.
+
+For server-wide fallback, set the following on the backend:
+
+- Google uses `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and/or comma-separated
+  `GEMINI_API_KEYS`. Set `GEMINI_MODEL` and `GEMMA_MODEL` to available model IDs.
+- OpenAI uses `OPENAI_MODEL` and `OPENAI_API_KEY` or comma-separated `OPENAI_API_KEYS`.
+- Groq uses `GROQ_MODEL` and `GROQ_API_KEY` or comma-separated `GROQ_API_KEYS`.
+
+Personal credentials use the backend's session encryption key. Keep
+`SECRET_KEY` stable and configure persistent database storage to retain keys
+across Render instance replacements. Hosted repairs report a model error
+when all available providers fail.

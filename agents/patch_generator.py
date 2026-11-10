@@ -1,10 +1,16 @@
-import os
 import difflib
 import logging
 from typing import Dict, Any
 from agents.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
+
+def source_diff(path, original, proposed):
+    lines = difflib.unified_diff(original.splitlines(True), proposed.splitlines(True),
+                                 fromfile=f"a/{path}", tofile=f"b/{path}")
+    return "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                   for line in lines)
+
 
 def generate_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -17,26 +23,12 @@ def generate_patch(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("[PatchGenerator] No failing_file found in state.")
         return {**state, "patch_diff": "", "retry_count": state.get("retry_count", 0) + 1}
         
-    # Read the actual file content (mocking if not found for testing)
-    original_content = ""
+    from agents.pr_agent import get_file_content
+    ref = state.get("commit_sha")
     try:
-        # In the real flow, this would read from the Docker sandbox path
-        if os.path.exists(failing_file):
-            with open(failing_file, 'r', encoding='utf-8') as f:
-                original_content = f.read()
-        else:
-            # Not on local disk - read it from the repository on GitHub (read-only).
-            try:
-                from agents.pr_agent import get_file_content
-                ref = state.get("commit_sha") or (state.get("event") or {}).get("branch") or "main"
-                original_content = get_file_content(state.get("repo_full_name", ""), failing_file, ref)
-                logger.info(f"[PatchGenerator] Loaded {failing_file} from GitHub ({ref[:7] if len(ref) >= 7 else ref})")
-            except Exception as gh_err:
-                logger.error(f"[PatchGenerator] Could not load {failing_file} from GitHub ({gh_err}).")
-                return {**state, "patch_diff": "", "error": f"Could not read failing file '{failing_file}' from repo: {gh_err}", "retry_count": state.get("retry_count", 0) + 1}
-    except Exception as e:
-        logger.error(f"[PatchGenerator] Error reading file: {e}")
-        return {**state, "patch_diff": "", "retry_count": state.get("retry_count", 0) + 1}
+        original_content = get_file_content(state["repo_full_name"], failing_file, ref)
+    except Exception as exc:
+        return {**state, "patch_diff": "", "error": f"Cannot read {failing_file} at {ref}: {exc}"}
 
     system_prompt = (
         "You are an expert developer. Your task is to fix a failing test by providing the corrected file content. "
@@ -55,12 +47,14 @@ def generate_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Include the failing test file content so the LLM knows what must pass
     failing_test = state.get("failing_test", "")
-    if failing_test:
+    tests = state.get("diagnostics", {}).get("tests", {})
+    for path, content in tests.items():
+        prompt += f"\nHistorical test {path}:\n{content}\n"
+    if failing_test and not tests:
         test_file = failing_test.split("::")[0] if "::" in failing_test else ""
         if test_file:
             try:
                 from agents.pr_agent import get_file_content
-                ref = state.get("commit_sha") or "main"
                 test_content = get_file_content(state.get("repo_full_name", ""), test_file, ref)
                 prompt += f"\nTest file ({test_file}) that must pass:\n{test_content}\n"
             except Exception:
@@ -68,9 +62,11 @@ def generate_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     
     # Include the failure log so LLM sees the actual error
     failure_log = state.get("failure_log", "")
-    if failure_log and "FAILED" in failure_log:
-        prompt += f"\nActual test failure output:\n{failure_log[:2000]}\n"
+    if failure_log:
+        prompt += f"\nActual test failure output:\n{failure_log[-12000:]}\n"
     
+    if state.get("validation_status") == "ERROR":
+        prompt += f"\nPrevious candidate failed static checks: {state.get('validator_summary', '')}\n"
     if state.get("bisect_intent_report"):
         prompt += f"\nGit Bisect Context:\n{state.get('bisect_intent_report')}\n"
         
@@ -90,37 +86,21 @@ def generate_patch(state: Dict[str, Any]) -> Dict[str, Any]:
     patched_content = call_llm(prompt=prompt, system=system_prompt)
 
     # call_llm reports failures as "Error: ..." text — never treat that as code.
-    if patched_content.lstrip().startswith("Error:"):
-        logger.error(f"[PatchGenerator] LLM call failed: {patched_content[:200]}")
-        return {**state, "patch_diff": "", "retry_count": state.get("retry_count", 0) + 1}
+    if not patched_content or patched_content.lstrip().startswith("Error:"):
+        logger.error("[PatchGenerator] Model did not return corrected source.")
+        return {**state, "error": "Model did not return corrected source.", "patch_diff": "", "retry_count": state.get("retry_count", 0) + 1}
 
     # Clean markdown if LLM includes it
-    patched_content = patched_content.strip()
-    if patched_content.startswith("```python"):
-        patched_content = patched_content[9:]
-    elif patched_content.startswith("```"):
-        patched_content = patched_content[3:]
-    if patched_content.endswith("```"):
-        patched_content = patched_content[:-3]
-    patched_content = patched_content.strip() + "\n"
-    if not original_content.endswith("\n"):
-        original_content += "\n"
-        
-    # Compute unified diff
-    logger.info("[PatchGenerator] Computing unified diff...")
-    original_lines = original_content.splitlines(keepends=True)
-    patched_lines = patched_content.splitlines(keepends=True)
-    
-    diff_generator = difflib.unified_diff(
-        original_lines, 
-        patched_lines, 
-        fromfile=f"a/{failing_file}", 
-        tofile=f"b/{failing_file}",
-        n=3
-    )
-    
-    patch_diff = "".join(diff_generator)
-    
+    if patched_content.startswith("```"):
+        lines = patched_content.splitlines(True)
+        if lines[-1].strip() == "```":
+            patched_content = "".join(lines[1:-1])
+    if not patched_content.strip() or patched_content.strip() == original_content.strip():
+        return {**state, "patch_diff": "", "patched_content": "", "error": "Model produced no source change."}
+    if original_content.endswith("\n") and not patched_content.endswith("\n"):
+        patched_content += "\n"
+    patch_diff = source_diff(failing_file, original_content, patched_content)
+
     if not patch_diff:
         logger.warning("[PatchGenerator] Computed diff is empty. No changes detected.")
         

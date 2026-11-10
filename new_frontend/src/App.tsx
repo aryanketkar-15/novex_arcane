@@ -11,6 +11,7 @@ import {
   type AuditRow,
   type GhRepo,
   type MemoryItem,
+  type ModelCredential,
   type Run,
   type Screen,
   type Settings,
@@ -65,7 +66,7 @@ function AppShell({
     ["people", "person", "Sent to a person", counts?.person || undefined],
     ["history", "history", "Past fixes", undefined],
   ];
-  const workspace = settings?.workspace ?? "Team Bahadur";
+  const workspace = settings?.workspace ?? "Team Mosambi";
   const repos = Array.from(new Set([...(settings?.repositories.map((r) => r.name) ?? []), ...runs.map((r) => r.repo)]));
   return (
     <div className="app-shell">
@@ -323,7 +324,7 @@ function Home({ go, openRun }: { go: (s: Screen) => void; openRun: () => void })
                 </div>
                 <span className="time">{duration(w.startedAt, null)}</span>
                 <div className="thin-progress">
-                  <span style={{ width: `${Math.max(8, (done / w.steps.length) * 100)}%` }} />
+                  <span style={{ width: `${Math.max(8, (done / Math.max(1, w.steps.length)) * 100)}%` }} />
                 </div>
               </button>
             );
@@ -348,8 +349,12 @@ function RunDialog({ close, started }: { close: () => void; started: (r: Run) =>
   const repos = settings?.repositories ?? [];
   const [repo, setRepo] = useState(repos[0]?.name ?? "");
   const [mine, setMine] = useState<GhRepo[]>([]);
+  const [repoHint, setRepoHint] = useState("Loading repositories…");
   useEffect(() => {
-    api.ghRepos().then((r) => setMine(r.repos)).catch(() => {});
+    api.ghRepos().then(({ repos }) => {
+      setMine(repos);
+      setRepoHint(repos.length ? "owner/name" : "Enter a repository as owner/name.");
+    }).catch(() => setRepoHint("Could not load repositories. Enter owner/name."));
   }, []);
   const [branch, setBranch] = useState("main");
   const [workflow, setWorkflow] = useState("");
@@ -384,7 +389,7 @@ function RunDialog({ close, started }: { close: () => void; started: (r: Run) =>
       }
     >
       <div className="form-grid two">
-        <Field label="Repository" helper="owner/name">
+        <Field label="Repository" helper={repoHint}>
           <input value={repo} onChange={(e) => setRepo(e.target.value)} list="known-repos" placeholder="owner/repository" />
           <datalist id="known-repos">
             {[...repos.map((r) => r.name), ...mine.map((r) => r.name)].filter((n, i, a) => a.indexOf(n) === i).map((n) => (
@@ -633,6 +638,7 @@ function RepairRun({ go, retry, assign }: { go: (s: Screen) => void; retry: () =
                 </button>
               </div>
               <div className="timeline">
+                {steps.length === 0 && <p className="helper">Waiting for repair steps…</p>}
                 {steps.map((step, i) => (
                   <button
                     key={step.key}
@@ -667,8 +673,8 @@ function RepairRun({ go, retry, assign }: { go: (s: Screen) => void; retry: () =
           <div className="decision-bar">
             <div>
               <strong>
-                {run.validationStatus === "SKIPPED" || run.isDraftPr
-                  ? "Draft PR ready · Sandbox skipped · Tests not verified"
+                {run.testVerification === "NOT_VERIFIED" || run.validationStatus === "SKIPPED" || run.isDraftPr
+                  ? (run.prUrl ? "Draft PR open" : run.validationStatus === "ERROR" ? "Static checks failed" : "Static checks passed") + " · Docker tests not verified"
                   : run.testsPassed == null
                   ? "Tests not run yet"
                   : run.testsPassed
@@ -1004,7 +1010,8 @@ function PRPreview() {
   }, [run?.id, run?.failingTest]);
   if (!run) return <div className="page"><Empty title="No run selected" body="Choose a run from Home." /></div>;
   const stats = run.diffSummary;
-  const mermaid = `Build failed → ${run.sha.slice(0, 7)} found → fix written → sandbox ${run.testsPassed ? "passed" : "failed"} → review`;
+  const sandboxSkipped = run.testVerification === "NOT_VERIFIED" || run.validationStatus === "SKIPPED" || run.isDraftPr;
+  const mermaid = `Build failed → ${run.sha.slice(0, 7)} found → fix written → sandbox ${sandboxSkipped ? "skipped" : run.testsPassed ? "passed" : "failed"} → review`;
   const open = async () => {
     setBusy(true);
     setErr("");
@@ -1035,8 +1042,8 @@ function PRPreview() {
             <code>arcane/fix-{run.sha.slice(0, 7)}</code>
             <span>into</span>
             <code>{run.branch}</code>
-            {run.isDraftPr || run.validationStatus === "SKIPPED" ? (
-              <Badge tone="saffron">Draft PR · Sandbox Skipped · Unverified</Badge>
+            {sandboxSkipped ? (
+              <Badge tone="saffron">Docker tests skipped · Unverified</Badge>
             ) : (
               run.testsPassed != null && <Badge tone={run.testsPassed ? "success" : "error"}>{run.testsPassed ? "Sandbox tests passed" : "Sandbox tests failed"}</Badge>
             )}
@@ -1059,17 +1066,17 @@ function PRPreview() {
             </ul>
           </div>
           <div className="pr-section">
-            <h2>{run.isDraftPr || run.validationStatus === "SKIPPED" ? "Verification & Checks" : "What was tested"}</h2>
+            <h2>{sandboxSkipped ? "Verification & Checks" : "What was tested"}</h2>
             <div className="test-grid">
-              {run.isDraftPr || run.validationStatus === "SKIPPED" ? (
+              {sandboxSkipped ? (
                 <>
                   <span><Icon name="check" />Analysis completed</span>
                   <span><Icon name="check" />Commit inspection completed</span>
-                  <span><Icon name="check" />Candidate patch generated</span>
-                  <span><Icon name="check" />Static checks completed (syntax & diff)</span>
+                  {stats.files > 0 && <span><Icon name="check" />Candidate patch generated</span>}
+                  <span><Icon name={run.validationStatus === "ERROR" ? "x" : "check"} />{run.validationStatus === "ERROR" ? "Static checks failed" : "Static checks passed"}</span>
                   <span><Icon name="clock" />Docker sandbox skipped (cloud)</span>
                   <span><Icon name="clock" />Tests not verified</span>
-                  <span><Icon name="check" />Draft PR ready for review</span>
+                  {run.prUrl && <span><Icon name="check" />Draft PR open for review</span>}
                 </>
               ) : (
                 <>
@@ -1091,11 +1098,11 @@ function PRPreview() {
             <span className="fail">Build failed</span><i />
             <span>Commit found</span><i />
             <span>Fix written</span><i />
-            {run.isDraftPr || run.validationStatus === "SKIPPED" ? (
+            {sandboxSkipped ? (
               <>
                 <span>Static checks passed</span><i />
                 <span className="warn">Sandbox skipped</span><i />
-                <span className="ready">Draft PR Review</span>
+                <span>{run.prUrl ? "Draft PR review" : "Review proposal"}</span>
               </>
             ) : (
               <>
@@ -1368,7 +1375,7 @@ function Settings() {
   const head = (title: string, description: string) => (
     <div className="settings-head">
       <div><h2>{title}</h2><p>{description}</p></div>
-      <Button kind="primary" onClick={save}>Save changes</Button>
+      {tab !== "Models" && <Button kind="primary" onClick={save}>Save changes</Button>}
     </div>
   );
   return (
@@ -1497,51 +1504,55 @@ function RepositorySettings({ d, set, head }: SP) {
   );
 }
 
-function ModelSettings({ d, set, head }: SP) {
-  const { notify } = useData();
-  const [status, setStatus] = useState(d.modelStatus);
-  const move = (i: number, dir: -1 | 1) => {
-    const j = i + dir;
-    if (j < 0 || j >= d.models.length) return;
-    const m = [...d.models];
-    [m[i], m[j]] = [m[j], m[i]];
-    set({ ...d, models: m.map((x, k) => ({ ...x, role: k === 0 ? "Primary" : `Fallback ${k}` })) });
-  };
-  return (
-    <>
-      {head("Models", "ARCANE tries these models in order when a repair needs another approach.")}
-      <div className="settings-block">
-        <div className="block-title">
-          <div><h3>Fallback order</h3><p>Use the arrows to change the order. The runtime chain in llm_client.py is Gemini → Gemma → Ollama → mock.</p></div>
-        </div>
-        <div className="model-list">
-          {d.models.map((m, i) => {
-            const st = status[m.id];
-            return (
-              <div className="model-row" key={m.id}>
-                <span className="order">{i + 1}</span>
-                <div>
-                  <strong>{m.name}</strong>
-                  <small>{m.role} · {st?.connected ? "Connected" : "Unavailable"} · {st?.detail}</small>
-                </div>
-                <Button onClick={() => move(i, -1)} disabled={i === 0}>↑</Button>
-                <Button onClick={() => move(i, 1)} disabled={i === d.models.length - 1}>↓</Button>
-                <Button
-                  onClick={async () => {
-                    const r = await api.testModel(m.id);
-                    setStatus({ ...status, [m.id]: r });
-                    notify(`${m.name}: ${r.connected ? "connected" : "not reachable"}`);
-                  }}
-                >
-                  Test connection
-                </Button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
+function ModelSettings({ head }: SP) {
+  const [rows, setRows] = useState<ModelCredential[]>([]);
+  const [provider, setProvider] = useState<ModelCredential["provider"]>("google");
+  const [model, setModel] = useState("");
+  const [key, setKey] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(true);
+  useEffect(() => {
+    api.modelKeys().then(setRows).catch(e => setError(e.message)).finally(() => setBusy(false));
+  }, []);
+
+  async function update(id?: number) {
+    setBusy(true);
+    setError("");
+    try {
+      if (id === undefined) {
+        await api.addModelKey(provider, model.trim(), key.trim());
+        setKey("");
+      } else {
+        await api.removeModelKey(id);
+      }
+      setRows(await api.modelKeys());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update model keys.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <>
+    {head("Models", "Your repairs try your keys in the order shown, then use the server fallbacks.")}
+    <div className="settings-block">
+      <h3>Personal model keys</h3>
+      <p>Each listed provider can receive repair prompts, including repository code and failure logs. Changes apply to new repairs.</p>
+      {rows.map((row, i) => <div className="model-row" key={row.id}>
+        <span className="order">{i + 1}</span>
+        <strong>{row.provider} / {row.model}</strong>
+        <Button disabled={busy} onClick={() => update(row.id)}>Remove</Button>
+      </div>)}
+      {!busy && !error && !rows.length && <p>Using server fallbacks.</p>}
+      <Field label="Provider"><select value={provider} onChange={e => setProvider(e.target.value as ModelCredential["provider"])}>
+        <option value="google">Google</option><option value="openai">OpenAI</option><option value="groq">Groq</option>
+      </select></Field>
+      <Field label="Model ID"><input value={model} onChange={e => setModel(e.target.value)} placeholder="Model ID from your provider" /></Field>
+      <Field label="API key"><input type="password" autoComplete="new-password" value={key} onChange={e => setKey(e.target.value)} /></Field>
+      <Button disabled={busy || !key.trim() || !model.trim()} onClick={() => update()}>Add key</Button>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  </>;
 }
 
 function SafetySettings({ d, set, head }: SP) {

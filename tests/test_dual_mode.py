@@ -248,7 +248,12 @@ class TestDualModePullRequests:
         mock_gh.get_repo.return_value = mock_repo
         mock_gh_cls.return_value = mock_gh
 
+        mock_repo.get_contents.return_value.decoded_content = b"1\n"
+        mock_repo.get_contents.return_value.sha = "source-blob"
+        mock_repo.get_git_commit.return_value.tree.tree = [MagicMock(path="f.py", mode="100644", sha="source-blob")]
+        mock_repo.create_git_tree.return_value.sha = "tree-sha"
         state = {
+            "patched_content": "2\n",
             "execution_mode": "hosted",
             "validation_status": "SKIPPED",
             "repo_full_name": "owner/repo",
@@ -310,7 +315,7 @@ class TestDualModePullRequests:
         assert "[DRAFT]" not in kwargs.get("title")
 
     def test_dry_run_mode_compatibility(self):
-        """Scenario 12: ARCANE_DRY_RUN=1 simulates PR URLs without making GitHub calls."""
+        """Scenario 12: ARCANE_DRY_RUN=1 returns no PR URL without making GitHub calls."""
         # 12a: Hosted dry run
         state_hosted = {
             "execution_mode": "hosted",
@@ -321,7 +326,7 @@ class TestDualModePullRequests:
         with patch.dict(os.environ, {"ARCANE_DRY_RUN": "1"}):
             res_hosted = creating_pr_node(state_hosted)
             assert res_hosted["is_draft_pr"] is True
-            assert res_hosted["pr_url"] == "https://github.com/owner/repo/pull/dry-run-draft-1234567"
+            assert res_hosted["pr_url"] is None
 
         # 12b: Local dry run
         state_local = {
@@ -333,4 +338,4 @@ class TestDualModePullRequests:
         with patch.dict(os.environ, {"ARCANE_DRY_RUN": "1"}):
             res_local = creating_pr_node(state_local)
             assert res_local["is_draft_pr"] is False
-            assert res_local["pr_url"] == "https://github.com/owner/repo/pull/dry-run-1234567"
+            assert res_local["pr_url"] is None

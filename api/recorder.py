@@ -151,7 +151,12 @@ def apply_node(run: dict, node: str, state: dict) -> None:
         store.set_step(run, "bisect", "done", _short(run["bisectReport"]) or "Bisect finished.", f"commit {run['sha'][:7]}")
 
     elif node == "patching":
-        run["patchDiff"] = state.get("patch_diff", "") or run["patchDiff"]
+        run["patchDiff"] = state.get("patch_diff", "")
+        run["patchedContent"] = state.get("patched_content", "")
+        if not run["patchDiff"].strip():
+            store.set_step(run, "patch", "failed", state.get("error") or "No source changes were generated.")
+            store.save()
+            return
         st = diff_stats(run["patchDiff"])
         ev = f"{len(st['files'])} files changed · {st['add']} additions · {st['del']} deletions"
         store.set_step(run, "patch", "done", f"Attempt {run['attempts']} produced a candidate patch.", ev)
@@ -171,6 +176,8 @@ def apply_node(run: dict, node: str, state: dict) -> None:
             "details": details,
         }
         body = "Merge conflict found — resolved with shared-intent analysis." if detected else "No merge conflicts with the target branch."
+        if run["conflict"]["action"] == "unverified":
+            body = "Merge compatibility unverified."
         store.set_step(run, "related", "done", (run["cascadeReport"] and _short(run["cascadeReport"]) + " · " or "") + body)
 
     elif node == "validating":
@@ -265,7 +272,7 @@ def finish_run(run: dict, final: dict, error: Optional[str] = None) -> None:
             run["status"] = "person"
             run["reason"] = "ARCANE did not produce a patch (the failing file was not available locally)"
         elif run.get("validationStatus") == "SKIPPED" or run.get("isDraftPr"):
-            run["reason"] = "Draft PR open on GitHub for review — tests were not run in a sandbox (hosted cloud environment)"
+            run["reason"] = ("Draft PR open on GitHub." if run["prUrl"] else "Patch prepared; no GitHub PR opened.") + " Docker tests were not run."
         elif conf is not None and conf < esc_below:
             run["status"] = "person"
             run["reason"] = f"Confidence {conf}% is below the {esc_below}% safety rule"
@@ -277,7 +284,7 @@ def finish_run(run: dict, final: dict, error: Optional[str] = None) -> None:
             run,
             "ready",
             "done" if run["status"] == "ready" else "failed",
-            "Draft PR ready for review (tests unverified)." if is_draft and run["status"] == "ready" else ("The fix is safe to open as a pull request." if run["status"] == "ready" else run["reason"]),
+            run["reason"] if is_draft and run["status"] == "ready" else ("The fix is safe to open as a pull request." if run["status"] == "ready" else run["reason"]),
             "draft PR · review required" if is_draft else (f"{conf}% confidence" if conf is not None else ""),
         )
         store.log(run, "INFO", f"Run finished — status={run['status']} (draft_pr={is_draft})")
@@ -298,6 +305,8 @@ def build_state_from_run(run: dict) -> dict:
         "commit_sha": run["sha"],
         "failure_log": run["failureLog"],
         "patch_diff": run["patchDiff"],
+        "patched_content": run.get("patchedContent", ""),
+        "event": {"branch": run["branch"]},
         "failing_test": run["failingTest"],
         "failing_file": run["failingFile"],
         "root_cause_summary": run["rootCause"],

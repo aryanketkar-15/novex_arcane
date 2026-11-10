@@ -90,6 +90,7 @@ class ArcaneState(TypedDict, total=False):
     failure_log: str
 
     # ── ANALYZING outputs ──
+    diagnostics: dict
     failing_test: str
     failing_file: str
     failing_line: int
@@ -213,6 +214,8 @@ def analyzing_node(state: ArcaneState) -> ArcaneState:
             result["agents_used"] = state.get("agents_used", "") + "analyst,"
             return result
         logger.warning("WARNING: analyst_agent not available — using mock")
+        if state.get("execution_mode") == "hosted":
+            raise RuntimeError("Hosted diagnosis requires the Analyst agent.")
         return {
             **state,
             "failing_test": "test_mock",
@@ -270,6 +273,8 @@ def patching_node(state: ArcaneState) -> ArcaneState:
             result["agents_used"] = state.get("agents_used", "") + "patch_gen,"
             return result
         
+        if state.get("execution_mode") == "hosted":
+            raise RuntimeError("Patch generator unavailable.")
         logger.warning("WARNING: patch_generator not available — using mock")
         return {
             **state,
@@ -285,6 +290,8 @@ def patching_node(state: ArcaneState) -> ArcaneState:
 @with_timeout("PROPAGATING")
 def propagating_node(state: ArcaneState) -> ArcaneState:
     """PROPAGATING — checks for cascade / downstream failures."""
+    if state.get("execution_mode") == "hosted":
+        return {**state, "cascade_report": "Cross-file impact unverified; no target checkout on host."}
     logger.info("[PROPAGATING] Checking downstream impact")
     try:
         if _propagator:
@@ -309,6 +316,8 @@ def propagating_node(state: ArcaneState) -> ArcaneState:
 def conflict_checking_node(state: ArcaneState) -> ArcaneState:
     """CONFLICT_CHECKING — detects merge conflicts with main branch."""
     logger.info("[CONFLICT_CHECKING] Verifying merge compatibility")
+    if state.get("execution_mode") == "hosted":
+        return {**state, "conflict_action": "unverified", "conflict_details": []}
     try:
         if _conflict_resolver:
             result = _conflict_resolver.check(state)
@@ -357,6 +366,8 @@ def validating_node(state: ArcaneState) -> ArcaneState:
                     result["auto_approved"] = False
             return result
             
+        if state.get("execution_mode") == "hosted":
+            raise RuntimeError("Static validator unavailable.")
         logger.warning("WARNING: validator_agent not available — using mock")
         passed = retry <= 1
         mock_score = 0.95 if passed else 0.30
@@ -407,7 +418,7 @@ def creating_pr_node(state: ArcaneState) -> ArcaneState:
             return {
                 **state,
                 "is_draft_pr": is_draft,
-                "pr_url": f"https://github.com/{state.get('repo_full_name', 'org/repo')}/pull/{prefix}-{sha}",
+                "pr_url": None,
             }
         if create_pr:
             pr_url = create_pr(state)
@@ -415,14 +426,7 @@ def creating_pr_node(state: ArcaneState) -> ArcaneState:
             result["agents_used"] = state.get("agents_used", "") + "pr_agent,"
             return result
             
-        logger.warning("WARNING: pr_agent not available — using mock")
-        sha = state.get("commit_sha", "unknown")[:7]
-        prefix = "mock-draft" if is_draft else "mock"
-        return {
-            **state,
-            "is_draft_pr": is_draft,
-            "pr_url": f"https://github.com/{state.get('repo_full_name', 'org/repo')}/pull/{prefix}-{sha}",
-        }
+        raise RuntimeError("PR agent unavailable; no pull request opened.")
     except Exception as e:
         state['error'] = str(e)
         state['retry_count'] = state.get('retry_count', 0) + 1
@@ -506,7 +510,7 @@ def escalated_node(state: ArcaneState) -> ArcaneState:
     logger.warning(report)
     return {
         **state,
-        "error": (
+        "error": state.get("error") or (
             f"Escalated after {state.get('retry_count', 0)} retries — "
             f"confidence: {state.get('confidence_score', 'N/A')} — "
             f"human review required for {state.get('failing_test', 'unknown test')}"
@@ -520,6 +524,8 @@ def escalated_node(state: ArcaneState) -> ArcaneState:
 
 def after_patching(state: ArcaneState) -> str:
     """After PATCHING: escalate if retry cap hit, else continue to PROPAGATING."""
+    if state.get("execution_mode") == "hosted" and not state.get("patch_diff", "").strip():
+        return "escalated"
     if state.get("retry_count", 0) >= MAX_RETRIES:
         logger.warning("[PATCHING] Retry cap reached — escalating")
         return "escalated"
@@ -577,6 +583,8 @@ def after_validating(state: ArcaneState) -> str:
 
 def after_analyzing(state: ArcaneState) -> str:
     """After ANALYZING: if ChromaDB memory hit, skip directly to creating_pr."""
+    if not state.get("failing_file"):
+        return "escalated"
     if state.get("fast_forward_patch"):
         logger.info("[ANALYZING] 🧠 Memory fast-forward — skipping to PR creation")
         return "creating_pr"
@@ -614,6 +622,7 @@ def build_graph() -> StateGraph:
         "analyzing",
         after_analyzing,
         {
+            "escalated": "escalated",
             "bisecting": "bisecting",
             "creating_pr": "creating_pr",
         },

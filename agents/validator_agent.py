@@ -48,7 +48,7 @@ def validate_hosted_static(state: Dict[str, Any]) -> Dict[str, Any]:
     state["timeout"] = False
     state["validator_exit_code"] = None
 
-    if not patch_diff or not patch_diff.strip():
+    if not patched_content.strip() or not patch_diff or not patch_diff.strip():
         state["validation_status"] = "ERROR"
         state["confidence_score"] = 0.0
         state["validator_summary"] = "Static check failed: No patch diff was generated."
@@ -71,6 +71,13 @@ def validate_hosted_static(state: Dict[str, Any]) -> Dict[str, Any]:
             state["validator_summary"] = f"Static check failed: Python syntax error in patched file: {e}."
             state["retry_count"] = state.get("retry_count", 0) + 1
             return state
+
+    lines = patch_diff.splitlines()
+    if (lines[:2] != [f"--- a/{failing_file}", f"+++ b/{failing_file}"]
+            or not any(line.startswith(("+", "-")) for line in lines[2:])):
+        state["validation_status"] = "ERROR"
+        state["validator_summary"] = "Diff has no source edit for the diagnosed file."
+        return state
 
     # Static checks passed successfully
     state["validation_status"] = "SKIPPED"

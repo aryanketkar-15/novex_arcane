@@ -23,9 +23,11 @@ for k, v in os.environ.items():
 
 from agents.orchestrator import graph
 
+from api.model_keys import router as model_keys_router, run_credentials
+from agents.llm_client import personal_credentials
 from api.main_state import pipeline_status, reset_agents
 from api.recorder import apply_node, finish_run, run_log_handler, start_run
-from api.auth import auth_router, token_for_login, token_for_repo
+from api.auth import auth_router, oauth_configured, token_for_login, token_for_repo
 from api.routes import router as api_router, github_token
 from api.store import store
 from agents.execution_mode import get_execution_mode, log_memory_usage, trigger_garbage_collection
@@ -68,6 +70,7 @@ async def process_events(app: FastAPI):
 
         final = {}
         error = None
+        credential_context = None
         token_ctx = None
         try:
             async with app.state.repair_semaphore:
@@ -79,6 +82,10 @@ async def process_events(app: FastAPI):
                     "failing_test": "unknown_test",
                     "retry_count": 0,
                 }
+                login = run.get("owner") if oauth_configured() else None
+                if run.get("source") == "webhook" and store.watched.get(run["repo"]) != login:
+                    login = None
+                credential_context = personal_credentials.set(run_credentials(login))
                 tok = token_for_login(run.get("owner", "")) or token_for_repo(run["repo"])
                 token_ctx = github_token(tok)
                 token_ctx.__enter__()
@@ -104,9 +111,9 @@ async def process_events(app: FastAPI):
         except Exception as e:
             error = str(e)
             logger.error(f"[Consumer] Unhandled error: {error}")
-            if "422" in error and "pull request already exists" in error.lower():
-                error = None
         finally:
+            if credential_context is not None:
+                personal_credentials.reset(credential_context)
             if token_ctx is not None:
                 token_ctx.__exit__(None, None, None)
             run_log_handler.run = None
@@ -155,6 +162,7 @@ app.add_middleware(
 
 app.include_router(webhook_router)
 app.include_router(auth_router)
+app.include_router(model_keys_router)
 app.include_router(api_router)
 
 

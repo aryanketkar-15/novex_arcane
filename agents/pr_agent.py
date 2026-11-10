@@ -46,35 +46,88 @@ def create_pr(state: dict) -> str:
     base_branch = (state.get("event") or {}).get("branch") or "main"
     patched_content = state.get("patched_content", "")
 
-    # 1. Create a new branch from base
-    base_ref = repo.get_git_ref(f"heads/{base_branch}")
-    try:
-        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_ref.object.sha)
-    except Exception as e:
-        logger.warning(f"Branch creation exception (might already exist): {e}")
+    if not patch_diff.strip():
+        raise ValueError("Cannot open a pull request without a source patch.")
+    if mode == "hosted" and validation_status != "SKIPPED":
+        raise ValueError("Hosted static validation must pass before opening a draft.")
+    if is_draft:
+        from agents.patch_generator import source_diff
+        import hashlib
+        from agents.validator_agent import validate_hosted_static
 
-    # 2. Commit the patch_diff content as a .diff artifact on this branch
-    file_path = f"arcane_patch_{commit_sha[:7]}.diff"
-    commit_msg = f"fix: ARCANE auto-repair code patch for {failing_test}"
+        if validation_status != "SKIPPED" or not patched_content.strip():
+            raise ValueError("A statically validated source change is required for a hosted draft.")
+        if validate_hosted_static(dict(state))["validation_status"] != "SKIPPED":
+            raise ValueError("Hosted static validation failed.")
+        base_sha = repo.get_git_ref(f"heads/{base_branch}").object.sha
+        historical = repo.get_contents(failing_file, ref=commit_sha)
+        current = repo.get_contents(failing_file, ref=base_sha)
+        if current.sha != historical.sha:
+            raise ValueError("Target file changed since the failed build. Run repair against the current revision.")
+        original = historical.decoded_content.decode("utf-8")
+        expected = source_diff(failing_file, original, patched_content)
+        if not expected or expected.rstrip("\n") != patch_diff.rstrip("\n"):
+            raise ValueError("Patch does not match the historical source and proposed file content.")
 
-    try:
-        contents = repo.get_contents(file_path, ref=branch_name)
-        repo.update_file(contents.path, commit_msg, patch_diff, contents.sha, branch=branch_name)
-    except Exception:
-        repo.create_file(file_path, commit_msg, patch_diff, branch=branch_name)
-
-    # 2b. Commit the actual fix to the failing file so the PR really changes the code
-    fix_committed = False
-    if patched_content and failing_file and failing_file not in ("N/A", "unknown_file", "unknown"):
+        # Build the commit before exposing the repair branch.
+        from github import InputGitTreeElement, GithubException
+        parent = repo.get_git_commit(base_sha)
+        directory = parent.tree
+        for part in failing_file.split("/")[:-1]:
+            entry = next(item for item in directory.tree if item.path == part and item.type == "tree")
+            directory = repo.get_git_tree(entry.sha)
+        target = next(item for item in directory.tree if item.path == failing_file.split("/")[-1])
+        if target.mode not in ("100644", "100755") or target.sha != historical.sha:
+            raise ValueError("Target must be the same regular source file at the branch tip.")
+        edit = InputGitTreeElement(failing_file, target.mode, "blob", content=patched_content)
+        tree = repo.create_git_tree([edit], parent.tree)
+        digest = hashlib.sha256((base_sha + tree.sha).encode()).hexdigest()[:12]
+        branch_name += "-" + digest
+        commit = repo.create_git_commit(f"fix: repair {failing_file}", tree, [parent])
         try:
-            try:
-                existing = repo.get_contents(failing_file, ref=branch_name)
-                repo.update_file(existing.path, f"fix: ARCANE repair for {failing_test}", patched_content, existing.sha, branch=branch_name)
-            except Exception:
-                repo.create_file(failing_file, f"fix: ARCANE repair for {failing_test}", patched_content, branch=branch_name)
-            fix_committed = True
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=commit.sha)
+        except GithubException as exc:
+            if exc.status != 422:
+                raise
+            existing = repo.get_git_commit(repo.get_git_ref(f"heads/{branch_name}").object.sha)
+            if existing.tree.sha != tree.sha or [p.sha for p in existing.parents] != [base_sha]:
+                raise
+            for pull in repo.get_pulls(state="open", base=base_branch, head=f"{repo_full_name.split('/')[0]}:{branch_name}"):
+                if pull.draft and pull.html_url:
+                    return pull.html_url
+        files_description = f"- `{failing_file}`"
+    else:
+        # 1. Create a new branch from base
+        base_ref = repo.get_git_ref(f"heads/{base_branch}")
+        try:
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_ref.object.sha)
         except Exception as e:
-            logger.warning(f"Could not commit the patched file {failing_file}: {e}")
+            logger.warning(f"Branch creation exception (might already exist): {e}")
+
+        # 2. Commit the patch_diff content as a .diff artifact on this branch
+        file_path = f"arcane_patch_{commit_sha[:7]}.diff"
+        commit_msg = f"fix: ARCANE auto-repair code patch for {failing_test}"
+
+        try:
+            contents = repo.get_contents(file_path, ref=branch_name)
+            repo.update_file(contents.path, commit_msg, patch_diff, contents.sha, branch=branch_name)
+        except Exception:
+            repo.create_file(file_path, commit_msg, patch_diff, branch=branch_name)
+
+        # 2b. Commit the actual fix to the failing file so the PR really changes the code
+        fix_committed = False
+        if patched_content and failing_file and failing_file not in ("N/A", "unknown_file", "unknown"):
+            try:
+                try:
+                    existing = repo.get_contents(failing_file, ref=branch_name)
+                    repo.update_file(existing.path, f"fix: ARCANE repair for {failing_test}", patched_content, existing.sha, branch=branch_name)
+                except Exception:
+                    repo.create_file(failing_file, f"fix: ARCANE repair for {failing_test}", patched_content, branch=branch_name)
+                fix_committed = True
+            except Exception as e:
+                logger.warning(f"Could not commit the patched file {failing_file}: {e}")
+
+        files_description = f"- `{file_path}`" + (f"\n- `{failing_file}`" if fix_committed else "")
 
     # Generate mermaid diagram
     logger.info("Generating Mermaid diagram...")
@@ -86,6 +139,7 @@ def create_pr(state: dict) -> str:
 
     # Title & Banner
     if is_draft:
+        mermaid_diagram = "```mermaid\nflowchart LR\n    CI[Failed workflow] --> P[Proposed source patch] --> S[Static checks] --> D[Draft PR for review]\n```"
         pr_title = f"[DRAFT] fix: ARCANE auto-repair proposal for {failing_test}"
         validation_banner = (
             "> ⚠️ **UNVERIFIED DRAFT PULL REQUEST**\n"
@@ -151,9 +205,7 @@ def create_pr(state: dict) -> str:
 - **Validator Summary:** {summary_text}
 
 ### 7. Files Changed
-- `{failing_file if failing_file and failing_file not in ('N/A','unknown_file','unknown') else 'api/auth.py'}`
-- `{file_path}` *(ARCANE patch diff)*
-{"" if fix_committed else "> Note: the patch was attached as a .diff file only; apply it manually."}
+{files_description}
 """
 
     # 3. Opens a PR from arcane/fix-{sha} to base
@@ -166,7 +218,7 @@ def create_pr(state: dict) -> str:
         draft=is_draft,
     )
 
-    if not pr or not pr.html_url:
+    if not pr or not pr.html_url or (is_draft and not pr.draft):
         raise RuntimeError("PR creation failed without returning a valid PR object.")
 
     logger.info(f"PR generated: {pr.html_url}")
@@ -183,4 +235,6 @@ def get_file_content(repo_full_name, file_path, branch='main'):
     repo = g.get_repo(repo_full_name)
 
     contents = repo.get_contents(file_path, ref=branch)
+    if isinstance(contents, list) or contents.type != "file" or contents.size > 256_000:
+        raise ValueError(f"Unsupported file type or size for {file_path}")
     return contents.decoded_content.decode('utf-8')
